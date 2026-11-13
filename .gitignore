@@ -1,0 +1,17 @@
+# Runtime data — recreated automatically on boot (see src/db.js)
+storage/
+storage-*/
+
+# Local configuration and secrets
+.env
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+__MACOSX/

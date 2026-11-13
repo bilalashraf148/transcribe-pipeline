@@ -1,0 +1,369 @@
+{
+  "info": {
+    "name": "Transcribe Pipeline",
+    "description": "Local test suite for the whisper transcription service.\n\nFlow: Create transcription -> Get job (poll) -> Get SRT/VTT -> Delete.\nThe Create request stores the returned job id in the collection variable {{jobId}} automatically.\n\nRequires Postman Desktop (the web client cannot read local files).\nSet the environment to 'Transcribe Pipeline - Local' before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:3100" },
+    { "key": "jobId", "value": "" },
+    { "key": "audioSample", "value": "C:/Users/Bilal/Desktop/Projects/volga/transcribe-pipeline/test/fixtures/speech-7s.mp4" }
+  ],
+  "item": [
+    {
+      "name": "00 Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
+        "description": "Liveness. Expect 200 {\"ok\":true}."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('ok is true', () => pm.expect(pm.response.json().ok).to.eql(true));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 Metrics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/metrics", "host": ["{{baseUrl}}"], "path": ["metrics"] },
+        "description": "Job counts by status, in-flight jobs, configured concurrency."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "console.log('counts:', JSON.stringify(pm.response.json().jobs));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 Create transcription (202)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "demo-{{$guid}}",
+            "disabled": true,
+            "description": "Enable to test replay: same key twice returns 200 + the original job instead of 202 + a new one."
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "audio",
+              "type": "file",
+              "src": "C:/Users/Bilal/Desktop/Projects/volga/transcribe-pipeline/test/fixtures/speech-7s.mp4",
+              "description": "Required. Replace with any .wav/.mp3/.m4a/.flac/.ogg/.opus/.aac/.webm/.mp4/.mov/.aiff file."
+            },
+            {
+              "key": "language",
+              "value": "en",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional ISO code. Leave disabled to let Whisper auto-detect."
+            },
+            {
+              "key": "webhook_url",
+              "value": "http://127.0.0.1:9999/hook",
+              "type": "text",
+              "disabled": true,
+              "description": "Optional. Signed with x-signature (HMAC-SHA256) when WEBHOOK_SECRET is set."
+            }
+          ]
+        },
+        "url": { "raw": "{{baseUrl}}/v1/transcriptions", "host": ["{{baseUrl}}"], "path": ["v1", "transcriptions"] },
+        "description": "Streams the file to disk and enqueues a job. Returns 202 with a job id.\n413 = over MAX_FILE_MB, 415 = extension not whitelisted, 429 = queue full, 400 = no 'audio' field."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+              "const j = pm.response.json();",
+              "pm.collectionVariables.set('jobId', j.id);",
+              "pm.collectionVariables.set('pollCount', 0);",
+              "pm.test('jobId captured', () => pm.expect(j.id).to.be.a('string').and.not.empty);",
+              "pm.test('status queued', () => pm.expect(j.status).to.be.oneOf(['queued','processing']));",
+              "console.log('jobId =', j.id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 Get job (poll)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/{{jobId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "{{jobId}}"]
+        },
+        "description": "Status, progress, attempts, and (once completed) segments + text.\nSend repeatedly, or use the Runner with a 2s delay and ~20 iterations to auto-poll."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "console.log(`status=${j.status} progress=${j.progress} attempts=${j.attempts} duration=${j.duration} lang=${j.language}`);",
+              "if (j.status === 'completed') {",
+              "  pm.test('has segments', () => pm.expect(j.segments).to.be.an('array').and.not.empty);",
+              "  pm.test('has text', () => pm.expect(j.text).to.be.a('string').and.not.empty);",
+              "  pm.test('duration plausible', () => pm.expect(j.duration).to.be.above(0));",
+              "  console.log(j.segments.map(s => `[${s.start} -> ${s.end}] ${s.text}`).join('\\n'));",
+              "}",
+              "if (j.status === 'failed') {",
+              "  pm.test('failed with error', () => pm.expect(j.error).to.be.a('string').and.not.empty);",
+              "  console.log('error:', j.error);",
+              "}",
+              "// auto-poll: re-send this request up to 30 times while unfinished (Runner only)",
+              "const live = j.status === 'queued' || j.status === 'processing';",
+              "const n = pm.collectionVariables.get('pollCount') || 0;",
+              "if (live && n < 30 && pm.execution && pm.execution.setNextRequest) {",
+              "  pm.collectionVariables.set('pollCount', n + 1);",
+              "  pm.execution.setNextRequest('03 Get job (poll)');",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 Get SRT",
+      "protocolProfileBehavior": { "disableBodyPruning": true },
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/{{jobId}}?format=srt",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "{{jobId}}"],
+          "query": [{ "key": "format", "value": "srt" }]
+        },
+        "description": "409 if the job is not completed yet."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('looks like SRT', () => pm.expect(pm.response.text()).to.match(/^1\\r?\\n\\d{2}:\\d{2}:\\d{2},\\d{3} --> /));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 Get VTT",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/{{jobId}}?format=vtt",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "{{jobId}}"],
+          "query": [{ "key": "format", "value": "vtt" }]
+        },
+        "description": "409 if the job is not completed yet."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('starts with WEBVTT', () => pm.expect(pm.response.text()).to.match(/^WEBVTT/));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 List jobs",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions?limit=10&offset=0",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions"],
+          "query": [
+            { "key": "limit", "value": "10" },
+            { "key": "offset", "value": "0" },
+            { "key": "status", "value": "completed", "disabled": true }
+          ]
+        },
+        "description": "Newest first. Add ?status=queued|processing|completed|failed to filter."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('data is an array', () => pm.expect(pm.response.json().data).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 Retry failed job (202)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/{{jobId}}/retry",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "{{jobId}}", "retry"]
+        },
+        "description": "Only valid for status=failed. Resumes from the last checkpointed chunk. 409 otherwise."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 or 409', () => pm.expect(pm.response.code).to.be.oneOf([202, 409]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 Delete job (204)",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/{{jobId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "{{jobId}}"]
+        },
+        "description": "Removes the audio directory and the job + segment rows. 409 while processing."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Neg 01 Wrong extension (415)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "audio",
+              "type": "file",
+              "src": "C:/Users/Bilal/Desktop/Projects/volga/transcribe-pipeline/test/fixtures/sample.txt",
+              "description": "Point at any .txt file. Rejected by the extension whitelist before any bytes are written."
+            }
+          ]
+        },
+        "url": { "raw": "{{baseUrl}}/v1/transcriptions", "host": ["{{baseUrl}}"], "path": ["v1", "transcriptions"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('415 Unsupported Media Type', () => pm.response.to.have.status(415));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Neg 02 Missing field (400)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "not_audio", "value": "x", "type": "text" }
+          ]
+        },
+        "url": { "raw": "{{baseUrl}}/v1/transcriptions", "host": ["{{baseUrl}}"], "path": ["v1", "transcriptions"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Neg 03 Unknown id (404)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/transcriptions/does-not-exist",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "transcriptions", "does-not-exist"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
